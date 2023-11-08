@@ -1,39 +1,45 @@
-use std::marker::PhantomData;
-use std::ptr;
-
 // this module adds some functionality based on the required implementations
 // here like: `LinkedList::pop_back` or `Clone for LinkedList<T>`
 // You are free to use anything in it, but it's mainly for the test framework.
+use std::ptr::NonNull;
+use std::marker::PhantomData;
 mod pre_implemented;
 
-pub struct Node<T> {
-    data: T,
-    next: *mut Node<T>,
-    prev: *mut Node<T>,
+#[derive(Debug)]
+pub struct LinkedList<T> {
+    front: Link<T>,
+    back: Link<T>,
+    len: usize,
+    _bool: PhantomData<T>,
 }
 
-pub struct LinkedList<T> {
-    head: *mut Node<T>,
-    tail: *mut Node<T>,
-    size: usize,
+type Link<T> = Option<NonNull<Node<T>>>;
+struct Node<T> {
+    front: Link<T>,
+    back: Link<T>,
+    elem: T,
 }
 
 pub struct Cursor<'a, T> {
-    pub list: &'a mut LinkedList<T>,
-    pub curr: *mut Node<T>,
+    list: &'a mut LinkedList<T>,
+    cur: Link<T>,
 }
 
+#[derive(Debug)]
 pub struct Iter<'a, T> {
-    curr: *mut Node<T>,
-    _marker: PhantomData<&'a Node<T>>,
+    front: Link<T>,
+    len: usize,
+    _marker: PhantomData<&'a T>,
 }
+
 
 impl<T> LinkedList<T> {
     pub fn new() -> Self {
-        LinkedList {
-            head: ptr::null_mut(),
-            tail: ptr::null_mut(),
-            size: 0,
+        Self {
+            front: None,
+            back: None,
+            len: 0,
+            _bool: PhantomData,
         }
     }
 
@@ -43,43 +49,38 @@ impl<T> LinkedList<T> {
     // whereas is_empty() is almost always cheap.
     // (Also ask yourself whether len() is expensive for LinkedList)
     pub fn is_empty(&self) -> bool {
-        self.size == 0
+        self.len == 0
     }
 
     pub fn len(&self) -> usize {
-        self.size
+        self.len
     }
 
     /// Return a cursor positioned on the front element
-    pub fn cursor_front(&mut self) -> Cursor<'_, T> {
-        let head_ptr: *mut _ = self.head;
+    pub fn cursor_front(&mut self) -> Cursor<T> {
+        let cur = self.front.map(|node| node);
         Cursor {
             list: self,
-            curr: head_ptr,
+            cur,
         }
     }
 
     /// Return a cursor positioned on the back element
     pub fn cursor_back(&mut self) -> Cursor<'_, T> {
-        let tail_ptr: *mut _ = self.tail;
+        let cur = self.back.map(|node| node);
         Cursor {
             list: self,
-            curr: tail_ptr,
+            cur,
         }
     }
 
     /// Return an iterator that moves from front to back
     pub fn iter(&self) -> Iter<'_, T> {
-        Iter {
-            curr: self.head,
+        Iter { 
+            front: self.front,
+            len: self.len,
             _marker: PhantomData,
         }
-    }
-}
-
-impl<T> Default for LinkedList<T> {
-    fn default() -> Self {
-        Self::new()
     }
 }
 
@@ -88,10 +89,9 @@ impl<T> Default for LinkedList<T> {
 impl<T> Cursor<'_, T> {
     /// Take a mutable reference to the current element
     pub fn peek_mut(&mut self) -> Option<&mut T> {
-        if self.curr.is_null() {
-            return None;
+        unsafe {
+            self.cur.map(|node| &mut (*node.as_ptr()).elem)
         }
-        unsafe { Some(&mut (*self.curr).data) }
     }
 
     /// Move one position forward (towards the back) and
@@ -99,11 +99,14 @@ impl<T> Cursor<'_, T> {
     #[allow(clippy::should_implement_trait)]
     pub fn next(&mut self) -> Option<&mut T> {
         unsafe {
-            if self.curr.is_null() || (*self.curr).next.is_null() {
-                return None;
+            let next = if let Some(cur) = self.cur {
+                (*cur.as_ptr()).back
             }
-            self.curr = (*self.curr).next;
-            Some(&mut (*self.curr).data)
+            else {
+                None
+            };
+            self.cur = next;
+            next.map(|node| &mut (*node.as_ptr()).elem)
         }
     }
 
@@ -111,11 +114,14 @@ impl<T> Cursor<'_, T> {
     /// return a reference to the new position
     pub fn prev(&mut self) -> Option<&mut T> {
         unsafe {
-            if self.curr.is_null() || (*self.curr).prev.is_null() {
-                return None;
+            let prev = if let Some(cur) = self.cur {
+                (*cur.as_ptr()).front
             }
-            self.curr = (*self.curr).prev;
-            Some(&mut (*self.curr).data)
+            else {
+                None
+            };
+            self.cur = prev;
+            prev.map(|node| &mut (*node.as_ptr()).elem)
         }
     }
 
@@ -123,106 +129,111 @@ impl<T> Cursor<'_, T> {
     /// to the neighboring element that's closest to the back. This can be
     /// either the next or previous position.
     pub fn take(&mut self) -> Option<T> {
-        let curr_ptr = self.curr;
+        if self.list.is_empty() {
+            return None;
+        }
         unsafe {
-            let next_node_ptr = (*curr_ptr).next;
-            let prev_node_ptr = (*curr_ptr).prev;
-            if !next_node_ptr.is_null() && prev_node_ptr.is_null() {
-                // curr is the head
-                (*next_node_ptr).prev = ptr::null_mut();
-                self.list.head = next_node_ptr;
-                self.curr = next_node_ptr;
-            } else if next_node_ptr.is_null() && !prev_node_ptr.is_null() {
-                // curr is the tail
-                (*prev_node_ptr).next = ptr::null_mut();
-                self.list.tail = prev_node_ptr;
-                self.curr = prev_node_ptr;
-            } else if !next_node_ptr.is_null() && !prev_node_ptr.is_null() {
-                // curr is in the middle
-                (*next_node_ptr).prev = prev_node_ptr;
-                (*prev_node_ptr).next = next_node_ptr;
-                self.curr = next_node_ptr;
-            } else {
-                // single element list
-                self.curr = ptr::null_mut();
-                self.list.head = ptr::null_mut();
-                self.list.tail = ptr::null_mut();
+            match self.cur {
+                Some(node) => {
+                    match ((*node.as_ptr()).front, (*node.as_ptr()).back) {
+                        (Some(f), Some(b)) => {
+                            (*f.as_ptr()).back = Some(b);
+                            (*b.as_ptr()).front = Some(f);
+                            self.cur = Some(b);
+                        },
+                        (Some(f), None) => {
+                            (*f.as_ptr()).back = None;
+                            self.list.back = Some(f);
+                            self.cur = Some(f);
+                        },
+                        (None, Some(b)) => {
+                            (*b.as_ptr()).front = None;
+                            self.list.front = Some(b);
+                            self.cur = Some(b);
+                        },
+                        (None, None) => {
+                            self.list.back = None;
+                            self.list.front = None;
+                            self.cur = None;
+                        },
+                    }
+                    
+                    self.list.len -= 1;
+                    Some(Box::from_raw(node.as_ptr()).elem)
+                },
+                None => None,
             }
-
-            self.list.size -= 1;
-
-            let data = std::ptr::read(&(*curr_ptr).data);
-
-            // needed to properly free mem
-            drop(Box::from_raw(curr_ptr));
-
-            Some(data)
         }
     }
 
-    pub fn insert_after(&mut self, element: T) {
-        let new_node = Box::new(Node {
-            data: element,
-            next: ptr::null_mut(),
-            prev: ptr::null_mut(),
-        });
-
-        //let new_node_ptr: *mut _ = &mut *new_node;
-        let new_node_ptr: *mut _ = Box::into_raw(new_node);
-        if !self.curr.is_null() {
-            unsafe {
-                (*new_node_ptr).prev = self.curr;
-                let next_node_ptr = (*self.curr).next;
-                if !next_node_ptr.is_null() {
-                    // curr is not tail
-                    (*next_node_ptr).prev = new_node_ptr;
-                    (*new_node_ptr).next = next_node_ptr;
-                } else {
-                    // curr is tail
-                    self.list.tail = new_node_ptr;
-                }
-                (*self.curr).next = new_node_ptr;
-            }
-        } else {
-            // list is empty
-            self.list.head = new_node_ptr;
-            self.list.tail = new_node_ptr;
-            self.curr = new_node_ptr;
+    pub fn insert_after(&mut self, _element: T) {
+        unsafe {
+            let new_ptr = NonNull::new_unchecked(Box::into_raw(
+                Box::new(
+                    Node {
+                        front: None,
+                        back: None,
+                        elem: _element,
+                    })));
+            match self.cur {
+                Some(node) => {
+                    match (*node.as_ptr()).back {
+                        Some(b) => {
+                            (*new_ptr.as_ptr()).back = Some(b);
+                            (*new_ptr.as_ptr()).front = Some(node);
+                            (*node.as_ptr()).back = Some(new_ptr);
+                            (*b.as_ptr()).front = Some(new_ptr);
+                        },
+                        None => {
+                            (*new_ptr.as_ptr()).front = Some(node);
+                            (*node.as_ptr()).back = Some(new_ptr);
+                            self.list.back = Some(new_ptr);
+                        },
+                    }
+                },
+                None => {
+                    self.list.front = Some(new_ptr);
+                    self.list.back = Some(new_ptr);
+                    self.cur = Some(new_ptr);
+                },
+            };
+            self.list.len += 1;
         }
-
-        self.list.size += 1;
     }
 
-    pub fn insert_before(&mut self, element: T) {
-        let new_node = Box::new(Node {
-            data: element,
-            next: ptr::null_mut(),
-            prev: ptr::null_mut(),
-        });
-
-        let new_node_ptr: *mut _ = Box::into_raw(new_node);
-        if !self.curr.is_null() {
-            unsafe {
-                (*new_node_ptr).next = self.curr;
-                let prev_node_ptr = (*self.curr).prev;
-                if !prev_node_ptr.is_null() {
-                    // curr is not head
-                    (*prev_node_ptr).next = new_node_ptr;
-                    (*new_node_ptr).prev = prev_node_ptr;
-                } else {
-                    // curr is head
-                    self.list.head = new_node_ptr;
-                }
-                (*self.curr).prev = new_node_ptr;
-            }
-        } else {
-            // list is empty
-            self.list.head = new_node_ptr;
-            self.list.tail = new_node_ptr;
-            self.curr = new_node_ptr;
+    pub fn insert_before(&mut self, _element: T) {
+        unsafe {
+            let new_ptr = NonNull::new_unchecked(
+                Box::into_raw(Box::new(
+                        Node {
+                            front: None,
+                            back: None,
+                            elem: _element,
+                        })));
+            match self.cur {
+                Some(node) => {
+                    match (*node.as_ptr()).front {
+                        Some(f) => {
+                            (*new_ptr.as_ptr()).front = Some(f);
+                            (*new_ptr.as_ptr()).back = Some(node);
+                            (*node.as_ptr()).front = Some(new_ptr);
+                            (*f.as_ptr()).back = Some(new_ptr);
+                        },
+                        None => {
+                            (*new_ptr.as_ptr()).back = Some(node);
+                            (*node.as_ptr()).front = Some(new_ptr);
+                            self.list.front = Some(new_ptr);
+                        },
+                    }
+                },
+                None => {
+                    self.list.front = Some(new_ptr);
+                    self.list.back = Some(new_ptr);
+                    self.cur = Some(new_ptr);
+                },
+            };
+            self.list.len += 1;
         }
-
-        self.list.size += 1;
     }
 }
 
@@ -230,26 +241,27 @@ impl<'a, T> Iterator for Iter<'a, T> {
     type Item = &'a T;
 
     fn next(&mut self) -> Option<&'a T> {
-        unsafe {
-            if self.curr.is_null() {
-                return None;
-            }
-            let data = &(*self.curr).data;
-            self.curr = (*self.curr).next;
-            Some(data)
+        if self.len > 0 {
+            self.front.map(|node| unsafe {
+                self.len -= 1;
+                self.front = (*node.as_ptr()).back;
+                &(*node.as_ptr()).elem
+            })
+        }
+        else {
+            None
         }
     }
 }
 
 impl<T> Drop for LinkedList<T> {
     fn drop(&mut self) {
-        let mut curr_ptr = self.head;
-        while !curr_ptr.is_null() {
-            unsafe {
-                let next_ptr = (*curr_ptr).next;
-                drop(Box::from_raw(curr_ptr));
-                curr_ptr = next_ptr;
-            }
-        }
+        while self.pop_back().is_some() {}
     }
 }
+
+unsafe impl<T: Send> Send for LinkedList<T> {}
+unsafe impl<T: Sync> Sync for LinkedList<T> {}
+
+unsafe impl<'a, T: Send> Send for Iter<'a, T> {}
+unsafe impl<'a, T: Sync> Sync for Iter<'a, T> {}
